@@ -7,6 +7,10 @@
 - Use `apply_patch` for edits.
 - Keep changes minimal and focused on the request.
 
+## Release workflow
+- CI runs on PRs and pushes to `main`.
+- Releases are built on tags matching `v*`.
+
 ## Style
 - Use ASCII in new files unless required.
 - Keep docs concise and actionable.
