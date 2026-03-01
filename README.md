@@ -49,6 +49,34 @@ Output:
 
 When you push a tag like `v1.2.3`, GitHub Actions builds Windows and macOS binaries and attaches them to the Release.
 
+## GitHub CLI auth (maintainers)
+
+This repo uses SSH for Git operations. Once SSH is set up, you can push tags and releases without re-authenticating each time.
+
+Check GitHub CLI auth:
+
+```bash
+gh auth status
+```
+
+Login (if needed):
+
+```bash
+gh auth login -h github.com
+```
+
+Switch between saved accounts:
+
+```bash
+gh auth switch
+```
+
+Verify SSH auth:
+
+```bash
+ssh -T git@github.com
+```
+
 ## Install on student machines
 
 Copy `dist/jan-config-install` to the student machine and run (defaults to `install`):
