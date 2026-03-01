@@ -1,0 +1,69 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        shell: pwsh
+        run: |
+          uv sync
+
+      - name: Build (PyInstaller)
+        shell: pwsh
+        run: |
+          uv run pyinstaller jan_config_tool.spec
+
+      - name: Upload Windows asset to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/jan-config-install.exe
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Sync dependencies
+        run: |
+          uv sync
+
+      - name: Build (PyInstaller)
+        run: |
+          uv run pyinstaller jan_config_tool.spec
+
+      - name: Package macOS binary
+        run: |
+          cd dist
+          zip -r jan-config-install-macos.zip jan-config-install
+
+      - name: Upload macOS asset to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/jan-config-install-macos.zip

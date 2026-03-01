@@ -1,0 +1,11 @@
+[project]
+name = "jan-proxy"
+version = "0.1.0"
+description = "Bundle and install a preconfigured Jan.ai setup (providers/gateway + assistants) via a single executable"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.134.0",
+    "httpx>=0.28.1",
+    "pyinstaller>=6.19.0",
+    "uvicorn>=0.41.0",
+]

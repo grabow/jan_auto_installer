@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+.venv/
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# IDEs
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
