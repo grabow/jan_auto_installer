@@ -1,5 +1,12 @@
 # Jan Config Installer
 
+## Students: download the installer
+
+Do not build this project yourself.
+Download the prebuilt installer from the GitHub Releases page and run it on your machine:
+
+- https://github.com/grabow/jan_auto_installer/releases/latest
+
 This repository packages a preconfigured Jan.ai setup (proxy/gateway settings and assistants)
 into a single executable using PyInstaller. The executable installs the configuration on a
 student's machine after they install Jan.ai themselves.
