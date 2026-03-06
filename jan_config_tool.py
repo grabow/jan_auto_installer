@@ -207,6 +207,157 @@ def _detect_localstorage_sqlite(data_dir: Optional[Path] = None) -> Optional[Pat
     return valid[0][0]
 
 
+def _iter_windows_webview_db_candidates() -> Iterable[Path]:
+    if not _is_windows():
+        return
+
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if not localappdata:
+        return
+
+    roots = [
+        Path(localappdata) / "jan.ai.app" / "EBWebView" / "Default",
+        Path(localappdata) / "Jan.ai.app" / "EBWebView" / "Default",
+    ]
+    seen = set()
+    for root in roots:
+        for name in ("History", "Web Data"):
+            candidate = root / name
+            if candidate.is_file() and candidate not in seen:
+                seen.add(candidate)
+                yield candidate
+
+
+def _decode_db_value(raw: object) -> Optional[str]:
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, memoryview):
+        raw = raw.tobytes()
+    if isinstance(raw, (bytes, bytearray)):
+        data = bytes(raw)
+        for encoding in ("utf-8", "utf-16le", "latin-1"):
+            try:
+                return data.decode(encoding)
+            except Exception:
+                pass
+    return None
+
+
+def _encode_db_value(value: str, original: object) -> object:
+    if isinstance(original, str):
+        return value
+    if isinstance(original, memoryview):
+        original = original.tobytes()
+    if isinstance(original, (bytes, bytearray)):
+        data = bytes(original)
+        for encoding in ("utf-8", "utf-16le"):
+            try:
+                data.decode(encoding)
+                return value.encode(encoding)
+            except Exception:
+                pass
+        return value.encode("utf-8")
+    return value
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def _looks_like_model_provider_payload(text: str) -> bool:
+    parsed: object = text
+    for _ in range(2):
+        if not isinstance(parsed, str):
+            break
+        try:
+            parsed = json.loads(parsed)
+        except Exception:
+            return False
+
+    obj = parsed
+    if not isinstance(obj, dict):
+        return False
+
+    state = obj.get("state")
+    if not isinstance(state, dict):
+        return False
+
+    if isinstance(state.get("providers"), list):
+        return True
+
+    return "selectedProvider" in obj or "selectedProvider" in state
+
+
+def _patch_windows_webview_model_provider(model_provider_value: str, backup: bool) -> Tuple[int, int]:
+    dbs = list(_iter_windows_webview_db_candidates())
+    if not dbs:
+        return (0, 0)
+
+    patched_dbs = 0
+    patched_rows = 0
+    for db_path in dbs:
+        if backup:
+            try:
+                shutil.copy2(db_path, _backup_path(db_path))
+            except Exception:
+                pass
+
+        con = sqlite3.connect(str(db_path))
+        db_updates = 0
+        try:
+            table_rows = con.execute(
+                "select name from sqlite_master where type='table' and name not like 'sqlite_%'"
+            ).fetchall()
+            for (table_name,) in table_rows:
+                q_table = _quote_ident(table_name)
+                try:
+                    cols = con.execute(f"pragma table_info({q_table})").fetchall()
+                except Exception:
+                    continue
+                for col in cols:
+                    col_name = col[1]
+                    q_col = _quote_ident(col_name)
+                    try:
+                        rows = con.execute(
+                            f"select rowid, {q_col} from {q_table} "
+                            f"where CAST({q_col} as TEXT) like ? and CAST({q_col} as TEXT) like ?",
+                            ('%"providers"%', '%"selectedProvider"%'),
+                        ).fetchall()
+                    except Exception:
+                        continue
+
+                    updates = []
+                    for rowid, raw in rows:
+                        text = _decode_db_value(raw)
+                        if not text or not _looks_like_model_provider_payload(text):
+                            continue
+                        if text == model_provider_value:
+                            continue
+                        updates.append((_encode_db_value(model_provider_value, raw), rowid))
+
+                    if updates:
+                        con.executemany(
+                            f"update {q_table} set {q_col} = ? where rowid = ?",
+                            updates,
+                        )
+                        db_updates += len(updates)
+
+            if db_updates > 0:
+                con.commit()
+                patched_dbs += 1
+                patched_rows += db_updates
+            else:
+                con.rollback()
+        except Exception:
+            con.rollback()
+        finally:
+            con.close()
+
+    return (patched_dbs, patched_rows)
+
+
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -410,28 +561,47 @@ def install_payload(args: argparse.Namespace) -> int:
         )
 
     if values:
+        hs_key: Optional[str]
+        if args.hs_offenburg_api_key is not None:
+            hs_key = args.hs_offenburg_api_key
+        else:
+            hs_key = os.environ.get("HS_OFFENBURG_API_KEY")
+
+        if hs_key is not None and hs_key.strip() and isinstance(values.get("model-provider"), str):
+            values["model-provider"] = _set_hs_offenburg_api_key(
+                values["model-provider"], hs_key.strip()
+            )
+
+    if values:
+        imported_localstorage = False
         db_path = _detect_localstorage_sqlite(data_dir=data_dir)
-        if not db_path:
+        if db_path:
+            _write_localstorage_keys(db_path, values)
+            imported_localstorage = True
+        elif _is_windows() and isinstance(values.get("model-provider"), str):
+            patched_dbs, patched_rows = _patch_windows_webview_model_provider(
+                values["model-provider"], backup=args.backup
+            )
+            if patched_rows > 0:
+                print(
+                    f"Patched WebView profile model-provider in {patched_rows} row(s) "
+                    f"across {patched_dbs} database(s)."
+                )
+                imported_localstorage = True
+            else:
+                print(
+                    "WARNING: Windows WebView profile was scanned but no model-provider JSON entry "
+                    "was found."
+                )
+
+        if not imported_localstorage:
             if args.require_localstorage:
-                print("LocalStorage sqlite database not found.")
+                print("LocalStorage import target not found.")
                 return 1
             print(
                 "WARNING: LocalStorage sqlite database not found. "
                 "Skipping LocalStorage import. Configure provider manually in Jan."
             )
-        else:
-            hs_key: Optional[str]
-            if args.hs_offenburg_api_key is not None:
-                hs_key = args.hs_offenburg_api_key
-            else:
-                hs_key = os.environ.get("HS_OFFENBURG_API_KEY")
-
-            if hs_key is not None and hs_key.strip() and isinstance(values.get("model-provider"), str):
-                values["model-provider"] = _set_hs_offenburg_api_key(
-                    values["model-provider"], hs_key.strip()
-                )
-
-            _write_localstorage_keys(db_path, values)
     elif args.hs_offenburg_api_key or os.environ.get("HS_OFFENBURG_API_KEY"):
         print("WARNING: No LocalStorage payload found; HS-Offenburg API key was not applied.")
 
@@ -591,7 +761,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         dest="require_localstorage",
         default=False,
-        help="Fail if LocalStorage sqlite database is not found",
+        help="Fail if LocalStorage import target is not found",
     )
     install_p.set_defaults(func=install_payload)
 
