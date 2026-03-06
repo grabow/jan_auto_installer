@@ -175,20 +175,31 @@ def _detect_localstorage_sqlite(data_dir: Optional[Path] = None) -> Optional[Pat
     if not candidates:
         return None
 
-    def score(path: Path) -> Tuple[int, float]:
+    def score(path: Path) -> Tuple[int, int, float]:
+        has_item_table = False
+        has_model_provider = False
         try:
             con = sqlite3.connect(str(path))
-            cur = con.execute("select key from ItemTable")
-            keys = {row[0] for row in cur.fetchall()}
+            cur = con.execute(
+                "select 1 from sqlite_master where type='table' and name='ItemTable' limit 1"
+            )
+            has_item_table = cur.fetchone() is not None
+            if has_item_table:
+                cur = con.execute("select 1 from ItemTable where key='model-provider' limit 1")
+                has_model_provider = cur.fetchone() is not None
             con.close()
         except Exception:
-            keys = set()
-        match_score = int("model-provider" in keys)
+            has_item_table = False
+            has_model_provider = False
         mtime = path.stat().st_mtime
-        return (match_score, mtime)
+        return (int(has_item_table), int(has_model_provider), mtime)
 
-    candidates.sort(key=score, reverse=True)
-    return candidates[0]
+    scored = [(path, score(path)) for path in candidates]
+    valid = [(path, s) for path, s in scored if s[0] == 1]
+    if not valid:
+        return None
+    valid.sort(key=lambda item: (item[1][1], item[1][2]), reverse=True)
+    return valid[0][0]
 
 
 def _ensure_dir(path: Path) -> None:
