@@ -136,6 +136,12 @@ By default the executable uses the bundled `jan_config_payload`. If you want to 
 
 ## Notes
 
+- Platform-specific LocalStorage handling:
+  macOS uses WebKit LocalStorage SQLite (`.../LocalStorage/localstorage.sqlite3`, `ItemTable`).
+  Windows uses WebView Local Storage (`%LOCALAPPDATA%\\jan.ai.app\\EBWebView\\Default\\Local Storage\\leveldb`)
+  and falls back to scanning WebView SQLite databases (`History`, `Web Data`) if needed.
+  Always close Jan before install.
+
 - The payload strips API keys by default. If you want to include them, export with:
 
 ```bash
