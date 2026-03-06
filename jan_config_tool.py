@@ -9,6 +9,11 @@ import sys
 from pathlib import Path
 from typing import Dict, Iterable, Optional, Tuple
 
+try:
+    from build_version import __version__ as APP_VERSION
+except Exception:
+    APP_VERSION = "dev"
+
 
 LOCALSTORAGE_KEYS = [
     "model-provider",
@@ -535,6 +540,12 @@ def _patch_assistant_extension_sorting(data_dir: Optional[Path]) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Export and install Jan.ai configuration.")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {APP_VERSION}",
+        help="Show version and exit",
+    )
     parser.add_argument("--data-dir", help="Override Jan data directory")
 
     sub = parser.add_subparsers(dest="command", required=True)
@@ -590,6 +601,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     if getattr(sys, "frozen", False) and len(sys.argv) == 1:
+        print(f"jan-config-install {APP_VERSION}")
         sys.argv.append("install")
     args = parser.parse_args()
     return args.func(args)

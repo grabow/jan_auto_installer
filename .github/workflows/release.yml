@@ -26,6 +26,11 @@ jobs:
         run: |
           uv sync
 
+      - name: Set build version
+        shell: pwsh
+        run: |
+          "__version__ = '${{ github.ref_name }}'" | Set-Content -Path build_version.py
+
       - name: Build (PyInstaller)
         shell: pwsh
         run: |
@@ -52,6 +57,10 @@ jobs:
       - name: Sync dependencies
         run: |
           uv sync
+
+      - name: Set build version
+        run: |
+          printf "__version__ = '%s'\n" "${GITHUB_REF_NAME}" > build_version.py
 
       - name: Build (PyInstaller)
         run: |

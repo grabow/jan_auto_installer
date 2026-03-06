@@ -92,6 +92,12 @@ Copy `dist/jan-config-install` to the student machine and run (defaults to `inst
 ./jan-config-install
 ```
 
+Check installer version:
+
+```bash
+./jan-config-install --version
+```
+
 If needed, you can set the HS-Offenburg API key during install (non-interactive):
 
 ```bash
