@@ -2,6 +2,8 @@
 
 ## Students: download the installer
 
+Before running the installer, fully close Jan.ai.
+
 Do not build this project yourself.
 Download the prebuilt installer from the GitHub Releases page and run it on your machine:
 
