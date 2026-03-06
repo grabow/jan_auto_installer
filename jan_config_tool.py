@@ -1,6 +1,7 @@
 import argparse
 import datetime as dt
 import glob
+import hashlib
 import json
 import os
 import shutil
@@ -13,6 +14,11 @@ try:
     from build_version import __version__ as APP_VERSION
 except Exception:
     APP_VERSION = "dev"
+
+try:
+    import plyvel
+except Exception:
+    plyvel = None
 
 
 LOCALSTORAGE_KEYS = [
@@ -228,6 +234,115 @@ def _iter_windows_webview_db_candidates() -> Iterable[Path]:
                 yield candidate
 
 
+def _iter_windows_localstorage_leveldb_candidates(data_dir: Optional[Path] = None) -> Iterable[Path]:
+    if not _is_windows():
+        return
+
+    roots = []
+    if data_dir:
+        roots.append(data_dir.parent.parent / "jan.ai.app" / "EBWebView" / "Default")
+        roots.append(data_dir.parent.parent / "Jan.ai.app" / "EBWebView" / "Default")
+
+    localappdata = os.environ.get("LOCALAPPDATA")
+    if localappdata:
+        roots.append(Path(localappdata) / "jan.ai.app" / "EBWebView" / "Default")
+        roots.append(Path(localappdata) / "Jan.ai.app" / "EBWebView" / "Default")
+
+    seen = set()
+    for root in roots:
+        candidate = root / "Local Storage" / "leveldb"
+        if candidate.is_dir() and (candidate / "CURRENT").exists() and candidate not in seen:
+            seen.add(candidate)
+            yield candidate
+
+
+def _encode_leveldb_localstorage_value(value: str, existing: Optional[bytes]) -> bytes:
+    prefix = b"\x01"
+    if existing and isinstance(existing, (bytes, bytearray)) and len(existing) > 0:
+        prefix = bytes(existing[:1])
+    return prefix + value.encode("utf-8")
+
+
+def _patch_windows_leveldb_localstorage(
+    values: Dict[str, str],
+    backup: bool,
+    data_dir: Optional[Path] = None,
+) -> Tuple[int, int, int]:
+    localstorage_values = {
+        key: value
+        for key, value in values.items()
+        if key in set(LOCALSTORAGE_KEYS) and isinstance(value, str)
+    }
+    if not localstorage_values:
+        return (0, 0, 0)
+    if plyvel is None:
+        return (0, 0, 0)
+
+    db_dirs = list(_iter_windows_localstorage_leveldb_candidates(data_dir=data_dir))
+    if not db_dirs:
+        return (0, 0, 0)
+
+    target_suffixes = {
+        key: (b"\x01" + key.encode("utf-8"))
+        for key in localstorage_values
+    }
+
+    patched_dbs = 0
+    patched_keys = 0
+    synced_keys = 0
+    for db_dir in db_dirs:
+        if backup:
+            try:
+                shutil.copytree(db_dir, _backup_path(db_dir))
+            except Exception:
+                pass
+
+        db = None
+        try:
+            db = plyvel.DB(str(db_dir), create_if_missing=False)
+            key_map: Dict[str, list[bytes]] = {key: [] for key in localstorage_values}
+            default_prefix = b"_http://tauri.localhost\x00"
+
+            for raw_key, _ in db:
+                if not isinstance(raw_key, (bytes, bytearray)):
+                    continue
+                key_bytes = bytes(raw_key)
+                if key_bytes.startswith(b"_") and b"\x01" in key_bytes:
+                    split_at = key_bytes.rfind(b"\x01")
+                    if split_at > 0:
+                        default_prefix = key_bytes[:split_at]
+                for name, suffix in target_suffixes.items():
+                    if key_bytes.endswith(suffix):
+                        key_map[name].append(key_bytes)
+
+            db_updates = 0
+            with db.write_batch() as wb:
+                for key_name, new_value in localstorage_values.items():
+                    candidate_keys = key_map.get(key_name) or []
+                    if not candidate_keys:
+                        candidate_keys = [default_prefix + target_suffixes[key_name]]
+
+                    for storage_key in candidate_keys:
+                        old_value = db.get(storage_key)
+                        encoded = _encode_leveldb_localstorage_value(new_value, old_value)
+                        if old_value == encoded:
+                            synced_keys += 1
+                            continue
+                        wb.put(storage_key, encoded)
+                        db_updates += 1
+
+            if db_updates > 0:
+                patched_dbs += 1
+                patched_keys += db_updates
+        except Exception:
+            pass
+        finally:
+            if db is not None:
+                db.close()
+
+    return (patched_dbs, patched_keys, synced_keys)
+
+
 def _decode_db_value(raw: object) -> Optional[str]:
     if raw is None:
         return None
@@ -266,31 +381,246 @@ def _quote_ident(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-def _looks_like_model_provider_payload(text: str) -> bool:
+def _json_load_layers(text: str, max_layers: int = 2) -> Tuple[object, int]:
     parsed: object = text
-    for _ in range(2):
-        if not isinstance(parsed, str):
-            break
+    layers = 0
+    while layers < max_layers and isinstance(parsed, str):
         try:
             parsed = json.loads(parsed)
+            layers += 1
         except Exception:
-            return False
+            break
+    return parsed, layers
 
-    obj = parsed
+
+def _json_dump_layers(value: object, layers: int) -> Optional[str]:
+    dumped: object = value
+    for _ in range(layers):
+        dumped = json.dumps(dumped, ensure_ascii=True)
+    if isinstance(dumped, str):
+        return dumped
+    return None
+
+
+def _looks_like_model_provider_payload_obj(obj: object) -> bool:
     if not isinstance(obj, dict):
         return False
-
-    state = obj.get("state")
-    if not isinstance(state, dict):
-        return False
-
-    if isinstance(state.get("providers"), list):
+    if isinstance(obj.get("providers"), list):
         return True
 
-    return "selectedProvider" in obj or "selectedProvider" in state
+    state = obj.get("state")
+    if isinstance(state, dict):
+        if isinstance(state.get("providers"), list):
+            return True
+        if isinstance(state.get("selectedProvider"), str):
+            return True
+
+    return isinstance(obj.get("selectedProvider"), str)
 
 
-def _patch_windows_webview_model_provider(model_provider_value: str, backup: bool) -> Tuple[int, int]:
+def _looks_like_model_provider_payload(text: str) -> bool:
+    parsed, layers = _json_load_layers(text, max_layers=2)
+    if layers == 0:
+        return False
+    return _looks_like_model_provider_payload_obj(parsed)
+
+
+def _maybe_patch_json_payload_text(text: str, values: Dict[str, str]) -> Optional[str]:
+    if not text:
+        return None
+
+    parsed, layers = _json_load_layers(text, max_layers=2)
+    if layers == 0:
+        if (
+            "model-provider" in values
+            and _looks_like_model_provider_payload(text)
+            and text != values["model-provider"]
+        ):
+            return values["model-provider"]
+        return None
+
+    changed = False
+    patched: object = parsed
+    if isinstance(patched, dict):
+        for key, replacement in values.items():
+            current = patched.get(key)
+            if isinstance(current, str) and current != replacement:
+                patched[key] = replacement
+                changed = True
+
+        nested_localstorage = patched.get("localstorage")
+        if isinstance(nested_localstorage, dict):
+            for key, replacement in values.items():
+                current = nested_localstorage.get(key)
+                if isinstance(current, str) and current != replacement:
+                    nested_localstorage[key] = replacement
+                    changed = True
+
+        model_provider_value = values.get("model-provider")
+        if isinstance(model_provider_value, str) and _looks_like_model_provider_payload_obj(patched):
+            replacement_obj: object = model_provider_value
+            try:
+                replacement_obj = json.loads(model_provider_value)
+            except Exception:
+                replacement_obj = model_provider_value
+            if patched != replacement_obj:
+                patched = replacement_obj
+                changed = True
+    elif isinstance(patched, str):
+        model_provider_value = values.get("model-provider")
+        if (
+            isinstance(model_provider_value, str)
+            and _looks_like_model_provider_payload(patched)
+            and patched != model_provider_value
+        ):
+            patched = model_provider_value
+            changed = True
+    else:
+        return None
+
+    if not changed:
+        return None
+    return _json_dump_layers(patched, layers)
+
+
+def _is_key_like_column(name: str) -> bool:
+    normalized = name.lower().replace("-", "_").strip()
+    if normalized in {"key", "name", "setting", "setting_key", "pref_key", "path"}:
+        return True
+    return normalized.endswith("_key")
+
+
+def _is_value_like_column(name: str) -> bool:
+    normalized = name.lower().replace("-", "_").strip()
+    if normalized in {"value", "data", "payload", "json", "content", "state"}:
+        return True
+    return normalized.endswith("_value") or normalized.startswith("value_")
+
+
+def _is_text_or_blob_column(col_type: str) -> bool:
+    normalized = (col_type or "").upper().strip()
+    if not normalized:
+        return True
+    return any(token in normalized for token in ("CHAR", "CLOB", "TEXT", "BLOB"))
+
+
+def _looks_relevant_payload_text(text: str) -> bool:
+    if not text:
+        return False
+    markers = (
+        "model-provider",
+        "last-used-model",
+        "last-used-assistant",
+        "tool-availability",
+        "selectedProvider",
+        "providers",
+    )
+    if any(marker in text for marker in markers):
+        return True
+    stripped = text.lstrip()
+    return stripped.startswith("{") or stripped.startswith("[") or stripped.startswith('"')
+
+
+def _patch_windows_webview_key_value_rows(
+    con: sqlite3.Connection,
+    table_name: str,
+    key_col: str,
+    value_col: str,
+    values: Dict[str, str],
+) -> int:
+    if not values:
+        return 0
+
+    q_table = _quote_ident(table_name)
+    q_key = _quote_ident(key_col)
+    q_value = _quote_ident(value_col)
+    placeholders = ", ".join("?" for _ in values)
+    sql = (
+        f"select rowid, {q_key}, {q_value} from {q_table} "
+        f"where {q_key} in ({placeholders}) and {q_value} is not null"
+    )
+    try:
+        rows = con.execute(sql, tuple(values.keys())).fetchall()
+    except Exception:
+        return 0
+
+    updates = []
+    for rowid, raw_key, raw_value in rows:
+        key = _decode_db_value(raw_key)
+        if not isinstance(key, str):
+            continue
+        replacement = values.get(key)
+        if not isinstance(replacement, str):
+            continue
+        current = _decode_db_value(raw_value)
+        if current is None or current == replacement:
+            continue
+        updates.append((_encode_db_value(replacement, raw_value), rowid))
+
+    if not updates:
+        return 0
+    try:
+        con.executemany(
+            f"update {q_table} set {q_value} = ? where rowid = ?",
+            updates,
+        )
+    except Exception:
+        return 0
+    return len(updates)
+
+
+def _patch_windows_webview_json_rows(
+    con: sqlite3.Connection,
+    table_name: str,
+    col_name: str,
+    values: Dict[str, str],
+) -> int:
+    q_table = _quote_ident(table_name)
+    q_col = _quote_ident(col_name)
+    sql = (
+        f"select rowid, {q_col} from {q_table} "
+        f"where {q_col} is not null and length({q_col}) > 1 and length({q_col}) <= 300000"
+    )
+    try:
+        cur = con.execute(sql)
+    except Exception:
+        return 0
+
+    updates = []
+    while True:
+        rows = cur.fetchmany(512)
+        if not rows:
+            break
+        for rowid, raw in rows:
+            text = _decode_db_value(raw)
+            if not isinstance(text, str) or not _looks_relevant_payload_text(text):
+                continue
+            patched = _maybe_patch_json_payload_text(text, values)
+            if not isinstance(patched, str) or patched == text:
+                continue
+            updates.append((_encode_db_value(patched, raw), rowid))
+
+    if not updates:
+        return 0
+    try:
+        con.executemany(
+            f"update {q_table} set {q_col} = ? where rowid = ?",
+            updates,
+        )
+    except Exception:
+        return 0
+    return len(updates)
+
+
+def _patch_windows_webview_localstorage(values: Dict[str, str], backup: bool) -> Tuple[int, int]:
+    localstorage_values = {
+        key: value
+        for key, value in values.items()
+        if key in set(LOCALSTORAGE_KEYS) and isinstance(value, str)
+    }
+    if not localstorage_values:
+        return (0, 0)
+
     dbs = list(_iter_windows_webview_db_candidates())
     if not dbs:
         return (0, 0)
@@ -311,38 +641,38 @@ def _patch_windows_webview_model_provider(model_provider_value: str, backup: boo
                 "select name from sqlite_master where type='table' and name not like 'sqlite_%'"
             ).fetchall()
             for (table_name,) in table_rows:
-                q_table = _quote_ident(table_name)
                 try:
-                    cols = con.execute(f"pragma table_info({q_table})").fetchall()
+                    cols = con.execute(f"pragma table_info({_quote_ident(table_name)})").fetchall()
                 except Exception:
                     continue
+
+                key_like_cols = [col[1] for col in cols if _is_key_like_column(col[1])]
+                value_like_cols = [
+                    col[1]
+                    for col in cols
+                    if col[1] not in key_like_cols and _is_value_like_column(col[1])
+                ]
+                for key_col in key_like_cols:
+                    for value_col in value_like_cols:
+                        db_updates += _patch_windows_webview_key_value_rows(
+                            con,
+                            table_name,
+                            key_col,
+                            value_col,
+                            localstorage_values,
+                        )
+
                 for col in cols:
                     col_name = col[1]
-                    q_col = _quote_ident(col_name)
-                    try:
-                        rows = con.execute(
-                            f"select rowid, {q_col} from {q_table} "
-                            f"where CAST({q_col} as TEXT) like ? and CAST({q_col} as TEXT) like ?",
-                            ('%"providers"%', '%"selectedProvider"%'),
-                        ).fetchall()
-                    except Exception:
+                    col_type = col[2] if len(col) > 2 else ""
+                    if not _is_text_or_blob_column(col_type):
                         continue
-
-                    updates = []
-                    for rowid, raw in rows:
-                        text = _decode_db_value(raw)
-                        if not text or not _looks_like_model_provider_payload(text):
-                            continue
-                        if text == model_provider_value:
-                            continue
-                        updates.append((_encode_db_value(model_provider_value, raw), rowid))
-
-                    if updates:
-                        con.executemany(
-                            f"update {q_table} set {q_col} = ? where rowid = ?",
-                            updates,
-                        )
-                        db_updates += len(updates)
+                    db_updates += _patch_windows_webview_json_rows(
+                        con,
+                        table_name,
+                        col_name,
+                        localstorage_values,
+                    )
 
             if db_updates > 0:
                 con.commit()
@@ -572,41 +902,72 @@ def install_payload(args: argparse.Namespace) -> int:
                 values["model-provider"], hs_key.strip()
             )
 
+    imported_localstorage = False
+    bootstrap_localstorage: Optional[Dict[str, str]] = None
     if values:
-        imported_localstorage = False
         db_path = _detect_localstorage_sqlite(data_dir=data_dir)
         if db_path:
             _write_localstorage_keys(db_path, values)
             imported_localstorage = True
-        elif _is_windows() and isinstance(values.get("model-provider"), str):
-            patched_dbs, patched_rows = _patch_windows_webview_model_provider(
-                values["model-provider"], backup=args.backup
+        elif _is_windows():
+            patched_dbs, patched_keys, synced_keys = _patch_windows_leveldb_localstorage(
+                values,
+                backup=args.backup,
+                data_dir=data_dir,
             )
-            if patched_rows > 0:
-                print(
-                    f"Patched WebView profile model-provider in {patched_rows} row(s) "
-                    f"across {patched_dbs} database(s)."
-                )
+            if patched_keys > 0 or synced_keys > 0:
+                if patched_keys > 0:
+                    print(
+                        f"Patched Windows Local Storage LevelDB in {patched_keys} key(s) "
+                        f"across {patched_dbs} database(s)."
+                    )
+                else:
+                    print(
+                        f"Windows Local Storage LevelDB already contains {synced_keys} matching key(s)."
+                    )
                 imported_localstorage = True
             else:
-                print(
-                    "WARNING: Windows WebView profile was scanned but no model-provider JSON entry "
-                    "was found."
+                patched_dbs, patched_rows = _patch_windows_webview_localstorage(
+                    values,
+                    backup=args.backup,
                 )
-
-        if not imported_localstorage:
-            if args.require_localstorage:
-                print("LocalStorage import target not found.")
-                return 1
-            print(
-                "WARNING: LocalStorage sqlite database not found. "
-                "Skipping LocalStorage import. Configure provider manually in Jan."
-            )
+                if patched_rows > 0:
+                    print(
+                        f"Patched WebView profile localstorage payload in {patched_rows} row(s) "
+                        f"across {patched_dbs} database(s)."
+                    )
+                    imported_localstorage = True
+                else:
+                    print(
+                        "WARNING: Windows Local Storage LevelDB and WebView sqlite files "
+                        "were scanned but no writable localstorage payload entry was found."
+                    )
+                    if args.patch_assistant_sort:
+                        bootstrap_localstorage = values
     elif args.hs_offenburg_api_key or os.environ.get("HS_OFFENBURG_API_KEY"):
         print("WARNING: No LocalStorage payload found; HS-Offenburg API key was not applied.")
 
     if args.patch_assistant_sort:
-        _patch_assistant_extension_sorting(data_dir)
+        _, bootstrap_ready = _patch_assistant_extension_sorting(
+            data_dir,
+            bootstrap_localstorage=bootstrap_localstorage,
+        )
+        if bootstrap_localstorage and bootstrap_ready and not imported_localstorage:
+            imported_localstorage = True
+            print(
+                "Injected one-time Windows localStorage bootstrap into assistant extension. "
+                "Launch Jan once to apply provider config."
+            )
+
+    if values and not imported_localstorage:
+        if args.require_localstorage:
+            print("LocalStorage import target not found.")
+            return 1
+        print(
+            "WARNING: LocalStorage import target not found. "
+            "Skipping LocalStorage import. Configure provider manually in Jan."
+        )
+
     print("Config installed successfully.")
     return 0
 
@@ -683,29 +1044,89 @@ def _find_assistant_extension_index(data_dir: Optional[Path]) -> Optional[Path]:
     return None
 
 
-def _patch_assistant_extension_sorting(data_dir: Optional[Path]) -> None:
+def _patch_assistant_extension_sorting(
+    data_dir: Optional[Path],
+    bootstrap_localstorage: Optional[Dict[str, str]] = None,
+) -> Tuple[bool, bool]:
     ext_path = _find_assistant_extension_index(data_dir)
     if not ext_path:
-        return
+        return (False, False)
+
     text = ext_path.read_text(encoding="utf-8")
-    if "test-assistent" in text and "assistantsData.sort" in text:
-        return
+
+    sort_marker = "assistantsData.sort((a, b) => {"
     needle = "\t\treturn assistantsData;\n\t}"
-    if needle not in text:
-        return
-    patch = (
-        "\t\tassistantsData.sort((a, b) => {\n"
-        "\t\t\tif (a.id === \"jan\") return -1;\n"
-        "\t\t\tif (b.id === \"jan\") return 1;\n"
-        "\t\t\tif (a.id === \"test-assistent\") return -1;\n"
-        "\t\t\tif (b.id === \"test-assistent\") return 1;\n"
-        "\t\t\tconst aKey = (a.name || a.id || \"\").toLowerCase();\n"
-        "\t\t\tconst bKey = (b.name || b.id || \"\").toLowerCase();\n"
-        "\t\t\treturn aKey.localeCompare(bKey, \"de\");\n"
-        "\t\t});\n"
-        "\t\treturn assistantsData;\n\t}"
-    )
-    ext_path.write_text(text.replace(needle, patch), encoding="utf-8")
+    changed = False
+
+    if sort_marker not in text:
+        if needle not in text:
+            return (False, False)
+        sort_patch = (
+            "\t\tassistantsData.sort((a, b) => {\n"
+            "\t\t\tif (a.id === \"jan\") return -1;\n"
+            "\t\t\tif (b.id === \"jan\") return 1;\n"
+            "\t\t\tif (a.id === \"test-assistent\") return -1;\n"
+            "\t\t\tif (b.id === \"test-assistent\") return 1;\n"
+            "\t\t\tconst aKey = (a.name || a.id || \"\").toLowerCase();\n"
+            "\t\t\tconst bKey = (b.name || b.id || \"\").toLowerCase();\n"
+            "\t\t\treturn aKey.localeCompare(bKey, \"de\");\n"
+            "\t\t});\n"
+            "\t\treturn assistantsData;\n\t}"
+        )
+        text = text.replace(needle, sort_patch)
+        changed = True
+
+    bootstrap_ready = False
+    if bootstrap_localstorage:
+        payload = {
+            key: value
+            for key, value in bootstrap_localstorage.items()
+            if key in set(LOCALSTORAGE_KEYS) and isinstance(value, str)
+        }
+        if payload:
+            payload_json = json.dumps(payload, ensure_ascii=True)
+            payload_version = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()[:12]
+            start_marker = "\t\t// jan-installer-localstorage-bootstrap:start\n"
+            end_marker = "\t\t// jan-installer-localstorage-bootstrap:end\n"
+            block = (
+                start_marker
+                + f"\t\tconst JAN_INSTALLER_LOCALSTORAGE_VERSION = \"{payload_version}\";\n"
+                + "\t\tif (\n"
+                + "\t\t\ttypeof localStorage !== \"undefined\" &&\n"
+                + "\t\t\tlocalStorage.getItem(\"__jan_installer_localstorage_version\") !== JAN_INSTALLER_LOCALSTORAGE_VERSION\n"
+                + "\t\t) {\n"
+                + f"\t\t\tconst janInstallerLocalStorage = {payload_json};\n"
+                + "\t\t\tfor (const [bootstrapKey, bootstrapValue] of Object.entries(janInstallerLocalStorage)) {\n"
+                + "\t\t\t\tif (typeof bootstrapValue === \"string\") {\n"
+                + "\t\t\t\t\tlocalStorage.setItem(bootstrapKey, bootstrapValue);\n"
+                + "\t\t\t\t}\n"
+                + "\t\t\t}\n"
+                + "\t\t\tlocalStorage.setItem(\"__jan_installer_localstorage_version\", JAN_INSTALLER_LOCALSTORAGE_VERSION);\n"
+                + "\t\t}\n"
+                + end_marker
+            )
+
+            existing_start = text.find(start_marker)
+            existing_end = text.find(end_marker)
+            if existing_start >= 0 and existing_end >= existing_start:
+                existing_end += len(end_marker)
+                existing = text[existing_start:existing_end]
+                if existing != block:
+                    text = text[:existing_start] + block + text[existing_end:]
+                    changed = True
+            else:
+                insertion_anchor = "\t\tassistantsData.sort((a, b) => {\n"
+                if insertion_anchor in text:
+                    text = text.replace(insertion_anchor, block + insertion_anchor, 1)
+                    changed = True
+
+            bootstrap_ready = f'JAN_INSTALLER_LOCALSTORAGE_VERSION = "{payload_version}"' in text
+
+    if changed:
+        ext_path.write_text(text, encoding="utf-8")
+
+    sort_ready = sort_marker in text
+    return (sort_ready, bootstrap_ready)
 
 
 def build_parser() -> argparse.ArgumentParser:

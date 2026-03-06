@@ -141,6 +141,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "httpx" },
+    { name = "plyvel-ci", marker = "sys_platform == 'win32'" },
     { name = "pyinstaller" },
     { name = "uvicorn" },
 ]
@@ -149,6 +150,7 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.134.0" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "plyvel-ci", marker = "sys_platform == 'win32'", specifier = ">=1.5.1" },
     { name = "pyinstaller", specifier = ">=6.19.0" },
     { name = "uvicorn", specifier = ">=0.41.0" },
 ]
@@ -181,6 +183,16 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/03/4f/2750f7f6f025a1507cd3b7218691671eecfd0bbebebe8b39aa0fe1d360b8/pefile-2024.8.26.tar.gz", hash = "sha256:3ff6c5d8b43e8c37bb6e6dd5085658d658a7a0bdcd20b6a07b1fcfc1c4e9d632", size = 76008, upload-time = "2024-08-26T20:58:38.155Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/54/16/12b82f791c7f50ddec566873d5bdd245baa1491bac11d15ffb98aecc8f8b/pefile-2024.8.26-py3-none-any.whl", hash = "sha256:76f8b485dcd3b1bb8166f1128d395fa3d87af26360c2358fb75b80019b957c6f", size = 74766, upload-time = "2024-08-26T21:01:02.632Z" },
+]
+
+[[package]]
+name = "plyvel-ci"
+version = "1.5.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f6/15/2dd89d1ec81ea44a41e6f35ad1a8a7789e7345831646daf03c6501172396/plyvel-ci-1.5.1.tar.gz", hash = "sha256:c28d861c56911ae70f481864016301e2d526c6c923f6aa9aa3cdf2c053457e29", size = 36869, upload-time = "2024-04-07T06:00:42.296Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c6/a5/23703cdcad2d3b6a51c6e50fd1e3ecd6e92929e3e0d522fd7deaa31c124f/plyvel_ci-1.5.1-cp312-cp312-win32.whl", hash = "sha256:b765431aad19b85d922df39421198bd08bbd90f0a189d35e01e282ea4437bae5", size = 363563, upload-time = "2024-04-07T05:59:56.28Z" },
+    { url = "https://files.pythonhosted.org/packages/7e/30/f64d0565cac63e23b6f3869539886be60c6ce830312f8abc2c1e8ce54ebc/plyvel_ci-1.5.1-cp312-cp312-win_amd64.whl", hash = "sha256:c177b6e533651f218140d657be9615bb42b94e43c455bf701cbbfee2a90c33ee", size = 448847, upload-time = "2024-04-07T05:59:57.942Z" },
 ]
 
 [[package]]

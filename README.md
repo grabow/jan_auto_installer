@@ -112,7 +112,9 @@ HS_OFFENBURG_API_KEY="..." ./jan-config-install
 
 If you omit the key, the installer does not modify the HS-Offenburg API key. You can enter it later in Jan.
 
-If `localstorage.json` or Jan's `localstorage.sqlite` is not found, install continues and only skips LocalStorage import.
+On Windows, if `localstorage.sqlite` is not available, installer writes provider/localStorage values
+to Jan's WebView Local Storage LevelDB (`%LOCALAPPDATA%\\jan.ai.app\\EBWebView\\Default\\Local Storage\\leveldb`).
+If no writable LocalStorage target is found, install continues and skips LocalStorage import.
 To enforce strict behavior (fail when LocalStorage import is not possible):
 
 ```bash
@@ -145,6 +147,8 @@ uv run python jan_config_tool.py export --keep-api-keys
 ```bash
 ./jan-config-install --backup
 ```
+
+  On Windows this also creates backups before editing WebView LocalStorage databases.
 
 - Sorting patch details:
   The installer patches Jan's assistant extension to enforce ordering in the "+" menu by default.
