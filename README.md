@@ -38,8 +38,8 @@ uv run python jan_config_tool.py export
 
 This creates `./jan_config_payload` with:
 
-- `localstorage.json`
-- `assistants/`
+- `assistants/` (always)
+- `localstorage.json` (only if Jan LocalStorage sqlite DB is found)
 
 ## Build the macOS executable
 
@@ -106,6 +106,13 @@ HS_OFFENBURG_API_KEY="..." ./jan-config-install
 
 If you omit the key, the installer does not modify the HS-Offenburg API key. You can enter it later in Jan.
 
+If `localstorage.json` or Jan's `localstorage.sqlite` is not found, install continues and only skips LocalStorage import.
+To enforce strict behavior (fail when LocalStorage import is not possible):
+
+```bash
+./jan-config-install install --require-localstorage
+```
+
 By default the installer patches Jan to sort assistants in the "+" menu (Jan first, then Test-Assistent, then alphabetical).
 To disable the patch:
 
@@ -139,6 +146,9 @@ uv run python jan_config_tool.py export --keep-api-keys
   `extensions/@janhq/assistant-extension/dist/index.js` under the user's home directory,
   but only accepts matches inside `.../Jan/data/...` to avoid patching unrelated files.
   Use `--no-patch-assistant-sort` to disable.
+
+- If no LocalStorage sqlite DB is found during export, the payload is still exported
+  with `assistants/` only and without `localstorage.json`.
 
 ## Full Uninstall (macOS)
 

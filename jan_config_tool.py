@@ -59,24 +59,60 @@ def _detect_data_dir(override: Optional[str] = None) -> Optional[Path]:
     return None
 
 
-def _localstorage_sqlite_candidates() -> Iterable[Path]:
+def _localstorage_sqlite_candidates(data_dir: Optional[Path] = None) -> Iterable[Path]:
     patterns = []
     if _is_macos():
-        base = _expand("~/Library/WebKit/jan.ai.app/WebsiteData")
-        patterns.append(str(base / "Default" / "**" / "LocalStorage" / "localstorage.sqlite3"))
+        roots = [
+            _expand("~/Library/WebKit/jan.ai.app/WebsiteData"),
+            _expand("~/Library/WebKit/Jan.ai.app/WebsiteData"),
+            _expand("~/Library/Application Support/jan.ai.app/WebKit/WebsiteData"),
+            _expand("~/Library/Application Support/Jan.ai.app/WebKit/WebsiteData"),
+        ]
+        if data_dir:
+            roots.append(data_dir.parent.parent / "jan.ai.app" / "WebKit" / "WebsiteData")
+            roots.append(data_dir.parent.parent / "Jan.ai.app" / "WebKit" / "WebsiteData")
+        for root in roots:
+            patterns.extend(
+                [
+                    str(root / "Default" / "**" / "LocalStorage" / "localstorage.sqlite3"),
+                    str(root / "Default" / "**" / "LocalStorage" / "localstorage.sqlite"),
+                    str(root / "Default" / "**" / "Local Storage" / "localstorage.sqlite3"),
+                    str(root / "Default" / "**" / "Local Storage" / "localstorage.sqlite"),
+                ]
+            )
     if _is_linux():
         base = _expand("~/.local/share/jan.ai.app/WebKit/WebsiteData")
         patterns.append(str(base / "Default" / "**" / "LocalStorage" / "localstorage.sqlite3"))
     if _is_windows():
+        appdata = os.environ.get("APPDATA")
         localappdata = os.environ.get("LOCALAPPDATA")
+        roots = []
+        if data_dir:
+            roots.append(data_dir)
+            roots.append(data_dir.parent)
+        if appdata:
+            roots.append(Path(appdata) / "Jan")
+            roots.append(Path(appdata) / "jan.ai.app")
         if localappdata:
-            base = Path(localappdata) / "jan.ai.app" / "WebKit" / "WebsiteData"
-            patterns.append(str(base / "Default" / "**" / "LocalStorage" / "localstorage.sqlite3"))
+            roots.append(Path(localappdata) / "Jan")
+            roots.append(Path(localappdata) / "jan.ai.app")
 
+        for root in roots:
+            patterns.extend(
+                [
+                    str(root / "**" / "LocalStorage" / "localstorage.sqlite3"),
+                    str(root / "**" / "LocalStorage" / "localstorage.sqlite"),
+                    str(root / "**" / "Local Storage" / "localstorage.sqlite3"),
+                    str(root / "**" / "Local Storage" / "localstorage.sqlite"),
+                ]
+            )
+
+    seen = set()
     for pattern in patterns:
         for match in glob.glob(pattern, recursive=True):
             path = Path(match)
-            if path.is_file():
+            if path.is_file() and path not in seen:
+                seen.add(path)
                 yield path
 
 
@@ -127,8 +163,8 @@ def _write_localstorage_keys(db_path: Path, values: Dict[str, str]) -> None:
         con.close()
 
 
-def _detect_localstorage_sqlite() -> Optional[Path]:
-    candidates = list(_localstorage_sqlite_candidates())
+def _detect_localstorage_sqlite(data_dir: Optional[Path] = None) -> Optional[Path]:
+    candidates = list(_localstorage_sqlite_candidates(data_dir=data_dir))
     if not candidates:
         return None
 
@@ -284,10 +320,17 @@ def export_payload(args: argparse.Namespace) -> int:
     assistants_dst = payload_dir / "assistants"
     _copy_assistants(assistants_src, assistants_dst, backup=False)
 
-    db_path = _detect_localstorage_sqlite()
+    payload_file = payload_dir / "localstorage.json"
+    db_path = _detect_localstorage_sqlite(data_dir=data_dir)
     if not db_path:
-        print("LocalStorage sqlite database not found.")
-        return 1
+        if payload_file.exists():
+            payload_file.unlink()
+        print(
+            "WARNING: LocalStorage sqlite database not found. "
+            "Exported assistants only. Configure provider manually in Jan."
+        )
+        print(f"Exported payload to {payload_dir}")
+        return 0
 
     values = _read_localstorage_keys(db_path, LOCALSTORAGE_KEYS)
     if "model-provider" in values:
@@ -296,7 +339,7 @@ def export_payload(args: argparse.Namespace) -> int:
         )
 
     payload = {"localstorage": values}
-    with (payload_dir / "localstorage.json").open("w", encoding="utf-8") as f:
+    with payload_file.open("w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2, ensure_ascii=True)
 
     contains_keys = False
@@ -314,9 +357,6 @@ def export_payload(args: argparse.Namespace) -> int:
 def install_payload(args: argparse.Namespace) -> int:
     payload_dir = _expand(args.payload_dir)
     payload_file = payload_dir / "localstorage.json"
-    if not payload_file.exists():
-        print("Payload localstorage.json not found.")
-        return 1
 
     data_dir = _detect_data_dir(args.data_dir)
     if not data_dir:
@@ -327,29 +367,51 @@ def install_payload(args: argparse.Namespace) -> int:
     assistants_dst = data_dir / "assistants"
     _copy_assistants(assistants_src, assistants_dst, backup=args.backup)
 
-    db_path = _detect_localstorage_sqlite()
-    if not db_path:
-        print("LocalStorage sqlite database not found.")
+    values: Dict[str, str] = {}
+    if payload_file.exists():
+        with payload_file.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+
+        parsed_values = payload.get("localstorage", {})
+        if not isinstance(parsed_values, dict):
+            print("Invalid payload format.")
+            return 1
+        values = parsed_values
+    elif args.require_localstorage:
+        print("Payload localstorage.json not found.")
         return 1
-
-    with payload_file.open("r", encoding="utf-8") as f:
-        payload = json.load(f)
-
-    values = payload.get("localstorage", {})
-    if not isinstance(values, dict):
-        print("Invalid payload format.")
-        return 1
-
-    hs_key: Optional[str]
-    if args.hs_offenburg_api_key is not None:
-        hs_key = args.hs_offenburg_api_key
     else:
-        hs_key = os.environ.get("HS_OFFENBURG_API_KEY")
+        print(
+            "WARNING: Payload localstorage.json not found. "
+            "Skipping LocalStorage import. Configure provider manually in Jan."
+        )
 
-    if hs_key is not None and hs_key.strip() and isinstance(values.get("model-provider"), str):
-        values["model-provider"] = _set_hs_offenburg_api_key(values["model-provider"], hs_key.strip())
+    if values:
+        db_path = _detect_localstorage_sqlite(data_dir=data_dir)
+        if not db_path:
+            if args.require_localstorage:
+                print("LocalStorage sqlite database not found.")
+                return 1
+            print(
+                "WARNING: LocalStorage sqlite database not found. "
+                "Skipping LocalStorage import. Configure provider manually in Jan."
+            )
+        else:
+            hs_key: Optional[str]
+            if args.hs_offenburg_api_key is not None:
+                hs_key = args.hs_offenburg_api_key
+            else:
+                hs_key = os.environ.get("HS_OFFENBURG_API_KEY")
 
-    _write_localstorage_keys(db_path, values)
+            if hs_key is not None and hs_key.strip() and isinstance(values.get("model-provider"), str):
+                values["model-provider"] = _set_hs_offenburg_api_key(
+                    values["model-provider"], hs_key.strip()
+                )
+
+            _write_localstorage_keys(db_path, values)
+    elif args.hs_offenburg_api_key or os.environ.get("HS_OFFENBURG_API_KEY"):
+        print("WARNING: No LocalStorage payload found; HS-Offenburg API key was not applied.")
+
     if args.patch_assistant_sort:
         _patch_assistant_extension_sorting(data_dir)
     print("Config installed successfully.")
@@ -495,6 +557,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Set HS-Offenburg API key (or use env HS_OFFENBURG_API_KEY)",
     )
+    install_p.add_argument(
+        "--require-localstorage",
+        action="store_true",
+        dest="require_localstorage",
+        default=False,
+        help="Fail if LocalStorage sqlite database is not found",
+    )
     install_p.set_defaults(func=install_payload)
 
     return parser
@@ -510,4 +579,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
