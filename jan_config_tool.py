@@ -100,6 +100,13 @@ def _localstorage_sqlite_candidates(data_dir: Optional[Path] = None) -> Iterable
         for root in roots:
             patterns.extend(
                 [
+                    str(root / "localstorage.sqlite3"),
+                    str(root / "localstorage.sqlite"),
+                    str(root / "data" / "localstorage.sqlite3"),
+                    str(root / "data" / "localstorage.sqlite"),
+                    str(root / "data" / "db" / "*.db"),
+                    str(root / "**" / "localstorage.sqlite3"),
+                    str(root / "**" / "localstorage.sqlite"),
                     str(root / "**" / "LocalStorage" / "localstorage.sqlite3"),
                     str(root / "**" / "LocalStorage" / "localstorage.sqlite"),
                     str(root / "**" / "Local Storage" / "localstorage.sqlite3"),
